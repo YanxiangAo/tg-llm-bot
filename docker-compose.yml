@@ -1,0 +1,19 @@
+services:
+  tg-llm-bot:
+    build: .
+    image: tg-llm-bot:latest
+    container_name: tg-llm-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data
+    # 使用 host 网络，便于直接访问宿主机上 127.0.0.1 的 new-api / 其他本地 LLM 网关
+    # 同时不需要暴露任何端口，Bot 只主动外连 Telegram
+    network_mode: host
+    deploy:
+      resources:
+        limits:
+          memory: 300M
