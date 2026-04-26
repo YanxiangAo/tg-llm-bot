@@ -45,11 +45,12 @@ Key variables:
 
 ```bash
 cd /root/tg-llm-bot
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs -f
 ```
 
-At first startup, image build may take 1-2 minutes.  
+By default, it pulls `otis49482/tg-llm-bot:latest` from Docker Hub.  
 When logs show `Bot ready: @xxx`, the service is online.
 
 ## 4) Common Commands
@@ -86,7 +87,7 @@ Send image = vision chat (caption is used as the question).
 docker compose ps
 docker compose logs -f --tail 200
 docker compose restart
-docker compose down && docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
 
 User states and history are persisted in `./data/users.json`.

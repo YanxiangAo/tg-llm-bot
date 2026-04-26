@@ -1,7 +1,6 @@
 services:
   tg-llm-bot:
-    build: .
-    image: tg-llm-bot:latest
+    image: otis49482/tg-llm-bot:latest
     container_name: tg-llm-bot
     restart: unless-stopped
     env_file: .env

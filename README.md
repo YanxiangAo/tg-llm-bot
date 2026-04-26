@@ -45,11 +45,12 @@ vim .env   # 填入 token / api_key / base_url / 白名单
 
 ```bash
 cd /root/tg-llm-bot
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs -f
 ```
 
-第一次会构建镜像（约 1–2 分钟）。看到 `Bot ready: @xxx` 即上线。
+默认会拉取 Docker Hub 镜像 `otis49482/tg-llm-bot:latest`。看到 `Bot ready: @xxx` 即上线。
 
 ## 四、常用命令
 
@@ -84,7 +85,7 @@ docker compose logs -f
 docker compose ps                          # 看状态
 docker compose logs -f --tail 200          # 看日志
 docker compose restart                     # 重启
-docker compose down && docker compose up -d --build   # 改完代码重新构建
+docker compose pull && docker compose up -d           # 拉取最新版镜像并重启
 ```
 
 用户配置和历史都保存在 `./data/users.json`，删除该文件相当于重置所有用户状态。
