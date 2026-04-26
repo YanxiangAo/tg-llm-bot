@@ -98,6 +98,21 @@ def _build_messages(state: UserState, user_content: Any) -> list[dict[str, Any]]
     return msgs
 
 
+async def _waiting_indicator_loop(msg, stop_event: asyncio.Event) -> None:
+    """Update a waiting message every second until stop_event is set."""
+    started_at = time.monotonic()
+    last_elapsed = -1
+    while not stop_event.is_set():
+        elapsed = int(time.monotonic() - started_at)
+        if elapsed != last_elapsed:
+            await _safe_edit(msg, f"⏳ 正在思考中... {elapsed}s")
+            last_elapsed = elapsed
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+
+
 # --------------------------------------------------------------------------- #
 # /start /help /id
 # --------------------------------------------------------------------------- #
@@ -115,6 +130,10 @@ HELP_TEXT = (
     "/id 查看你的 Telegram user id（用于白名单）\n"
     "\n"
     "*会话*\n"
+    "/sessions 查看历史会话列表\n"
+    "/newchat 新建会话\n"
+    "/use <会话ID> 切换并继续某个历史会话\n"
+    "/delsession <会话ID> 删除会话（不带参数则删当前）\n"
     "/reset 清空当前对话历史\n"
     "/stats 查看当前配置 + Token 用量\n"
     "\n"
@@ -126,12 +145,83 @@ HELP_TEXT = (
     "/preset 选择预置系统提示词\n"
     "\n"
     "*采样参数*\n"
-    "/params 用按钮微调 temperature / top\\_p / max\\_tokens / stream\n"
+    "/params 用按钮微调 temperature / top\\_p / top\\_k / repeat\\_penalty / max\\_tokens / stream\n"
     "/set temperature 0.7\n"
     "/set top\\_p 0.9\n"
+    "/set top\\_k 40\n"
+    "/set repeat\\_penalty 1.1\n"
     "/set max\\_tokens 4096\n"
     "/set stream on|off\n"
 )
+
+
+def _summarize_title(text: str, limit: int = 24) -> str:
+    t = (text or "").replace("\n", " ").replace("`", "'").strip()
+    if not t:
+        return "新会话"
+    if t.startswith("[图片]"):
+        t = t.replace("[图片]", "", 1).strip()
+        t = f"图片: {t}" if t else "图片会话"
+    return t[:limit] + ("…" if len(t) > limit else "")
+
+
+def _session_history_summary(history: list[dict[str, Any]]) -> str:
+    """Build a compact plain-text summary from an existing conversation history."""
+    if not history:
+        return "（该会话暂无历史消息）"
+
+    user_msgs: list[str] = []
+    assistant_msgs: list[str] = []
+    for m in history:
+        role = str(m.get("role", ""))
+        content = str(m.get("content", "")).replace("\n", " ").strip()
+        if not content:
+            continue
+        if role == "user":
+            user_msgs.append(content)
+        elif role == "assistant":
+            assistant_msgs.append(content)
+
+    first_user = user_msgs[0][:70] + ("…" if len(user_msgs[0]) > 70 else "") if user_msgs else "（无）"
+    last_user = user_msgs[-1][:70] + ("…" if len(user_msgs[-1]) > 70 else "") if user_msgs else "（无）"
+    last_assistant = (
+        assistant_msgs[-1][:120] + ("…" if len(assistant_msgs[-1]) > 120 else "")
+        if assistant_msgs
+        else "（无）"
+    )
+
+    return (
+        f"- 用户轮次：{len(user_msgs)}\n"
+        f"- 助手轮次：{len(assistant_msgs)}\n"
+        f"- 首个问题：{first_user}\n"
+        f"- 最近问题：{last_user}\n"
+        f"- 最近回答：{last_assistant}"
+    )
+
+
+async def _render_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    storage: Storage = context.application.bot_data["storage"]
+    state = await storage.get(user_id)
+    sessions = await storage.list_sessions(user_id)
+    rows: list[list[InlineKeyboardButton]] = []
+    lines = ["会话列表（最新在前）"]
+    for i, s in enumerate(sessions[:12], start=1):
+        sid = s.get("id", "")
+        title = s.get("title", "新会话")
+        hlen = len(s.get("history", []))
+        active = " ✅" if sid == state.active_session_id else ""
+        lines.append(f"{sid} · {title} ({hlen}条){active}")
+        rows.append(
+            [
+                InlineKeyboardButton(f"切换 #{i}", callback_data=f"session:use:{sid}"),
+                InlineKeyboardButton(f"删除 #{i}", callback_data=f"session:del:{sid}"),
+            ]
+        )
+    rows.append([InlineKeyboardButton("➕ 新建会话", callback_data="session:new")])
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 @auth_required
@@ -151,6 +241,55 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         f"你的 Telegram user id: `{user.id}`\n用户名: @{user.username or '(无)'}",
+        parse_mode="Markdown",
+    )
+
+
+@auth_required
+async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _render_sessions(update, context, update.effective_user.id)
+
+
+@auth_required
+async def cmd_newchat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.application.bot_data["storage"]
+    sess = await storage.create_session(update.effective_user.id, title="新会话")
+    await update.message.reply_text(f"✅ 已新建会话：`{sess['id']}`", parse_mode="Markdown")
+
+
+@auth_required
+async def cmd_use(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.application.bot_data["storage"]
+    parts = (update.message.text or "").split()
+    if len(parts) < 2:
+        await update.message.reply_text("用法：`/use <会话ID>`", parse_mode="Markdown")
+        return
+    sid = parts[1].strip()
+    ok = await storage.switch_session(update.effective_user.id, sid)
+    if not ok:
+        await update.message.reply_text(f"❌ 未找到会话：`{sid}`", parse_mode="Markdown")
+        return
+    st = await storage.get(update.effective_user.id)
+    summary = _session_history_summary(st.history)
+    await update.message.reply_text(
+        f"✅ 已切换到会话：`{sid}`（{len(st.history)}条历史）\n\n"
+        f"该会话摘要：\n{summary}",
+        parse_mode="Markdown",
+    )
+
+
+@auth_required
+async def cmd_delsession(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.application.bot_data["storage"]
+    state = await storage.get(update.effective_user.id)
+    parts = (update.message.text or "").split()
+    sid = parts[1].strip() if len(parts) > 1 else state.active_session_id
+    ok, active_sid = await storage.delete_session(update.effective_user.id, sid)
+    if not ok:
+        await update.message.reply_text(f"❌ 未找到会话：`{sid}`", parse_mode="Markdown")
+        return
+    await update.message.reply_text(
+        f"🗑️ 已删除会话：`{sid}`\n当前会话：`{active_sid}`",
         parse_mode="Markdown",
     )
 
@@ -221,6 +360,50 @@ async def cb_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await storage.update(q.from_user.id, model=payload)
     await q.edit_message_text(f"✅ 已切换模型：`{payload}`", parse_mode="Markdown")
+
+
+async def cb_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    cfg: Config = context.application.bot_data["cfg"]
+    if cfg.allowed_user_ids and q.from_user.id not in cfg.allowed_user_ids:
+        await q.edit_message_text("⛔️ 你不在白名单。")
+        return
+    storage: Storage = context.application.bot_data["storage"]
+    parts = (q.data or "").split(":", 2)
+    if len(parts) < 2:
+        return
+    action = parts[1]
+    sid = parts[2] if len(parts) > 2 else ""
+
+    if action == "new":
+        sess = await storage.create_session(q.from_user.id, title="新会话")
+        await q.edit_message_text(f"✅ 已新建会话：`{sess['id']}`", parse_mode="Markdown")
+        return
+    if not sid:
+        return
+    if action == "use":
+        ok = await storage.switch_session(q.from_user.id, sid)
+        if ok:
+            st = await storage.get(q.from_user.id)
+            summary = _session_history_summary(st.history)
+            await q.edit_message_text(
+                f"✅ 已切换会话：`{sid}`（{len(st.history)}条历史）\n\n"
+                f"该会话摘要：\n{summary}",
+                parse_mode="Markdown",
+            )
+        else:
+            await q.edit_message_text(f"❌ 会话不存在：`{sid}`", parse_mode="Markdown")
+        return
+    if action == "del":
+        ok, active_sid = await storage.delete_session(q.from_user.id, sid)
+        if ok:
+            await q.edit_message_text(
+                f"🗑️ 已删除会话：`{sid}`\n当前会话：`{active_sid}`",
+                parse_mode="Markdown",
+            )
+        else:
+            await q.edit_message_text(f"❌ 会话不存在：`{sid}`", parse_mode="Markdown")
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +477,8 @@ async def cb_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 PARAM_BOUNDS = {
     "temperature": (0.0, 2.0, 0.1),
     "top_p": (0.0, 1.0, 0.05),
+    "top_k": (1, 200, 5),
+    "repeat_penalty": (0.8, 2.0, 0.05),
     "max_tokens": (256, 32768, 512),
 }
 
@@ -309,6 +494,8 @@ def _params_keyboard(state: UserState) -> InlineKeyboardMarkup:
     rows = [
         row("temperature", state.temperature, ".2f"),
         row("top_p", state.top_p, ".2f"),
+        row("top_k", state.top_k, "d"),
+        row("repeat_penalty", state.repeat_penalty, ".2f"),
         row("max_tokens", state.max_tokens, "d"),
         [
             InlineKeyboardButton(
@@ -326,6 +513,8 @@ def _params_text(state: UserState) -> str:
         "*采样参数*\n"
         f"temperature = `{state.temperature:.2f}`  范围 0.0–2.0\n"
         f"top\\_p = `{state.top_p:.2f}`  范围 0.0–1.0\n"
+        f"top\\_k = `{state.top_k}`  范围 1–200\n"
+        f"repeat\\_penalty = `{state.repeat_penalty:.2f}`  范围 0.8–2.0\n"
         f"max\\_tokens = `{state.max_tokens}`  范围 256–32768\n"
         f"stream = `{state.stream}`\n"
     )
@@ -395,7 +584,8 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     parts = (update.message.text or "").split()
     if len(parts) < 3:
         await update.message.reply_text(
-            "用法：`/set <key> <value>`\nkey 支持：`temperature`, `top_p`, `max_tokens`, `stream`",
+            "用法：`/set <key> <value>`\n"
+            "key 支持：`temperature`, `top_p`, `top_k`, `repeat_penalty`, `max_tokens`, `stream`",
             parse_mode="Markdown",
         )
         return
@@ -407,7 +597,7 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             state = await storage.update(update.effective_user.id, stream=val)
             await update.message.reply_text(f"✅ stream = `{state.stream}`", parse_mode="Markdown")
             return
-        if key in {"temperature", "top_p"}:
+        if key in {"temperature", "top_p", "repeat_penalty"}:
             v = float(raw)
             lo, hi, _ = PARAM_BOUNDS[key]
             if not (lo <= v <= hi):
@@ -415,13 +605,13 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             state = await storage.update(update.effective_user.id, **{key: v})
             await update.message.reply_text(f"✅ {key} = `{v:.3f}`", parse_mode="Markdown")
             return
-        if key == "max_tokens":
+        if key in {"max_tokens", "top_k"}:
             v = int(raw)
             lo, hi, _ = PARAM_BOUNDS[key]
             if not (lo <= v <= hi):
                 raise ValueError(f"超出范围 [{lo}, {hi}]")
-            state = await storage.update(update.effective_user.id, max_tokens=v)
-            await update.message.reply_text(f"✅ max_tokens = `{v}`", parse_mode="Markdown")
+            state = await storage.update(update.effective_user.id, **{key: v})
+            await update.message.reply_text(f"✅ {key} = `{v}`", parse_mode="Markdown")
             return
         await update.message.reply_text(f"未知 key: `{key}`", parse_mode="Markdown")
     except Exception as e:
@@ -446,11 +636,18 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = await storage.get(update.effective_user.id)
     sp = state.system_prompt
     sp_short = (sp[:80] + "…") if len(sp) > 80 else sp
+    session_title = _summarize_title(
+        str(state.sessions.get(state.active_session_id, {}).get("title", "新会话")),
+        limit=40,
+    )
     text = (
         "*当前会话*\n"
+        f"会话ID: `{state.active_session_id}`\n"
+        f"会话标题: `{session_title}`\n"
         f"模型: `{state.model}`\n"
         f"系统提示词: `{sp_short or '(空)'}`\n"
         f"temperature=`{state.temperature:.2f}` top\\_p=`{state.top_p:.2f}` "
+        f"top\\_k=`{state.top_k}` repeat\\_penalty=`{state.repeat_penalty:.2f}` "
         f"max\\_tokens=`{state.max_tokens}` stream=`{state.stream}`\n"
         f"历史消息数: `{len(state.history)}`\n\n"
         "*累计用量*\n"
@@ -541,24 +738,37 @@ async def _do_chat_once(
     cfg: Config = context.application.bot_data["cfg"]
     storage: Storage = context.application.bot_data["storage"]
     llm: LLMClient = context.application.bot_data["llm"]
+    waiting_msg = await update.message.reply_text("⏳ 正在思考中... 0s", disable_web_page_preview=True)
+    waiting_stop = asyncio.Event()
+    waiting_task = asyncio.create_task(_waiting_indicator_loop(waiting_msg, waiting_stop))
 
-    text, pt, ct = await llm.chat_once(
-        model=state.model,
-        messages=messages,
-        temperature=state.temperature,
-        top_p=state.top_p,
-        max_tokens=state.max_tokens,
-    )
+    try:
+        text, pt, ct = await llm.chat_once(
+            model=state.model,
+            messages=messages,
+            temperature=state.temperature,
+            top_p=state.top_p,
+            top_k=state.top_k,
+            repeat_penalty=state.repeat_penalty,
+            max_tokens=state.max_tokens,
+        )
+    finally:
+        waiting_stop.set()
+        await waiting_task
+
     if not text:
         text = "(模型返回空内容)"
 
-    for chunk in _split(text):
+    chunks = _split(text)
+    await _safe_edit(waiting_msg, chunks[0])
+    for chunk in chunks[1:]:
         await update.message.reply_text(chunk, disable_web_page_preview=True)
 
     await storage.append_history(
         update.effective_user.id,
         [history_user_msg, {"role": "assistant", "content": text}],
         cap=cfg.max_history_messages,
+        title_hint=_summarize_title(str(history_user_msg.get("content", ""))),
     )
     await storage.add_usage(update.effective_user.id, pt, ct)
 
@@ -574,7 +784,10 @@ async def _do_chat_stream(
     storage: Storage = context.application.bot_data["storage"]
     llm: LLMClient = context.application.bot_data["llm"]
 
-    placeholder = await update.message.reply_text("…", disable_web_page_preview=True)
+    placeholder = await update.message.reply_text("⏳ 正在思考中... 0s", disable_web_page_preview=True)
+    waiting_stop = asyncio.Event()
+    waiting_task = asyncio.create_task(_waiting_indicator_loop(placeholder, waiting_stop))
+    first_token_received = False
     full = ""
     cur_msg = placeholder
     cur_text = ""
@@ -587,12 +800,19 @@ async def _do_chat_stream(
             messages=messages,
             temperature=state.temperature,
             top_p=state.top_p,
+            top_k=state.top_k,
+            repeat_penalty=state.repeat_penalty,
             max_tokens=state.max_tokens,
         ):
             if p or c:
                 pt, ct = p or pt, c or ct
             if not delta:
                 continue
+            if not first_token_received:
+                first_token_received = True
+                waiting_stop.set()
+                await waiting_task
+                cur_text = ""
             full += delta
             cur_text += delta
 
@@ -617,6 +837,8 @@ async def _do_chat_stream(
                 await _safe_edit(cur_msg, cur_text or "…")
                 last_edit = now
     finally:
+        waiting_stop.set()
+        await waiting_task
         # Final flush for the last chunk
         if cur_text:
             await _safe_edit(cur_msg, cur_text)
@@ -629,6 +851,7 @@ async def _do_chat_stream(
         update.effective_user.id,
         [history_user_msg, {"role": "assistant", "content": full}],
         cap=cfg.max_history_messages,
+        title_hint=_summarize_title(str(history_user_msg.get("content", ""))),
     )
     await storage.add_usage(update.effective_user.id, pt, ct)
 

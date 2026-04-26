@@ -6,9 +6,11 @@ A Telegram bot connected to any OpenAI-compatible API, with support for:
 
 - Model switching (`/model`)
 - System prompt management (`/system`) + prompt presets (`/preset`)
-- Parameter tuning (`/params`: temperature, top_p, max_tokens, stream)
+- Parameter tuning (`/params`: temperature, top_p, top_k, repeat_penalty, max_tokens, stream)
 - Multi-turn context + one-command reset (`/reset`)
+- Multi-session management (list, switch, delete, auto titles)
 - Streaming replies (edit message while generating)
+- Dynamic waiting seconds before first token (to show bot is alive)
 - Token usage stats (`/stats`)
 - Vision input (send image directly, requires a vision-capable model)
 - Telegram user ID whitelist
@@ -40,6 +42,8 @@ Key variables:
 | `ALLOWED_USER_IDS` | Comma-separated Telegram numeric user IDs; empty means no restriction (**not recommended**) |
 | `DEFAULT_MODEL` | Default model ID |
 | `AVAILABLE_MODELS` | Keep empty to fetch from `GET /v1/models` dynamically |
+| `DEFAULT_TOP_K` | Default top_k integer |
+| `DEFAULT_REPEAT_PENALTY` | Default repeat penalty float |
 
 ## 3) Start
 
@@ -65,15 +69,23 @@ Send these commands to the bot:
 /preset                   choose prompt preset
 /params                   tune parameters with inline buttons
 /set temperature 0.3      set parameter directly
+/set top_p 0.9
+/set top_k 40
+/set repeat_penalty 1.1
 /set max_tokens 4096
 /set stream off
+/sessions                 list sessions (switch/delete)
+/newchat                  create a new session
+/use <session_id>         continue an old session
+/delsession <session_id>  delete a session (no arg = current)
 /reset                    clear conversation history
 /stats                    show session config and token usage
 /id                       show your Telegram user ID
 ```
 
 Send text = normal chat.  
-Send image = vision chat (caption is used as the question).
+Send image = vision chat (caption is used as the question).  
+When switching sessions (`/use` or `/sessions` button), the bot also sends a short conversation summary for quick context recovery.
 
 ## 5) Todo
 

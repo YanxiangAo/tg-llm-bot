@@ -19,16 +19,21 @@ from .handlers import (
     cb_model,
     cb_param,
     cb_preset,
+    cb_session,
     cmd_help,
     cmd_id,
     cmd_model,
+    cmd_newchat,
     cmd_params,
     cmd_preset,
+    cmd_sessions,
+    cmd_delsession,
     cmd_reset,
     cmd_set,
     cmd_start,
     cmd_stats,
     cmd_system,
+    cmd_use,
     on_error,
     on_photo,
     on_text,
@@ -59,6 +64,7 @@ async def _post_init(app: Application) -> None:
             BotCommand("start", "欢迎"),
             BotCommand("help", "查看所有命令"),
             BotCommand("model", "切换模型"),
+            BotCommand("sessions", "查看和切换历史会话"),
             BotCommand("system", "查看/设置系统提示词"),
             BotCommand("preset", "选择预设系统提示词"),
             BotCommand("params", "调节采样参数"),
@@ -85,6 +91,8 @@ def build_app(cfg: Config) -> Application:
             system_prompt="",
             temperature=cfg.default_temperature,
             top_p=cfg.default_top_p,
+            top_k=cfg.default_top_k,
+            repeat_penalty=cfg.default_repeat_penalty,
             max_tokens=cfg.default_max_tokens,
             stream=cfg.stream_default,
         ),
@@ -106,6 +114,10 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("sessions", cmd_sessions))
+    app.add_handler(CommandHandler("newchat", cmd_newchat))
+    app.add_handler(CommandHandler("use", cmd_use))
+    app.add_handler(CommandHandler("delsession", cmd_delsession))
     app.add_handler(CommandHandler("system", cmd_system))
     app.add_handler(CommandHandler("preset", cmd_preset))
     app.add_handler(CommandHandler("params", cmd_params))
@@ -115,6 +127,7 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("settings", cmd_stats))
 
     app.add_handler(CallbackQueryHandler(cb_model, pattern=r"^model:"))
+    app.add_handler(CallbackQueryHandler(cb_session, pattern=r"^session:"))
     app.add_handler(CallbackQueryHandler(cb_preset, pattern=r"^preset:"))
     app.add_handler(CallbackQueryHandler(cb_param, pattern=r"^param:"))
 

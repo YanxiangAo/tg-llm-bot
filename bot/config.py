@@ -42,6 +42,8 @@ class Config:
     available_models: list[str]
     default_temperature: float
     default_top_p: float
+    default_top_k: int
+    default_repeat_penalty: float
     default_max_tokens: int
     max_history_messages: int
     stream_default: bool
@@ -75,6 +77,8 @@ class Config:
             available_models=_csv(os.getenv("AVAILABLE_MODELS")),
             default_temperature=_float(os.getenv("DEFAULT_TEMPERATURE"), 0.7),
             default_top_p=_float(os.getenv("DEFAULT_TOP_P"), 1.0),
+            default_top_k=_int(os.getenv("DEFAULT_TOP_K"), 40),
+            default_repeat_penalty=_float(os.getenv("DEFAULT_REPEAT_PENALTY"), 1.0),
             default_max_tokens=_int(os.getenv("DEFAULT_MAX_TOKENS"), 2048),
             max_history_messages=_int(os.getenv("MAX_HISTORY_MESSAGES"), 20),
             stream_default=_bool(os.getenv("STREAM_DEFAULT"), True),

@@ -6,9 +6,11 @@
 
 - 切换模型 (`/model`)
 - 查看 / 设置系统提示词 (`/system`) + 预设模板 (`/preset`)
-- 微调采样参数 (`/params`：temperature、top_p、max_tokens、stream)
+- 微调采样参数 (`/params`：temperature、top_p、top_k、repeat_penalty、max_tokens、stream)
 - 多轮上下文 + 一键清空 (`/reset`)
+- 多会话管理（查看、切换、删除、自动会话标题）
 - 流式输出（边生成边编辑消息）
+- 生成前动态等待秒数提示（防止误判卡住）
 - Token 累计用量统计 (`/stats`)
 - 视觉理解：直接给 Bot 发图片即可（需要 vision 模型）
 - Telegram user id 白名单
@@ -40,6 +42,8 @@ vim .env   # 填入 token / api_key / base_url / 白名单
 | `ALLOWED_USER_IDS` | 逗号分隔的 Telegram 数字 id；留空 = 不限制（**不推荐**） |
 | `DEFAULT_MODEL` | 默认模型名 |
 | `AVAILABLE_MODELS` | 可切换的模型列表，逗号分隔；留空则启动时自动 `GET /v1/models` |
+| `DEFAULT_TOP_K` | 默认 top_k（整数） |
+| `DEFAULT_REPEAT_PENALTY` | 默认 repeat_penalty（浮点） |
 
 ## 三、启动
 
@@ -64,14 +68,22 @@ docker compose logs -f
 /preset                   选预设模板
 /params                   按钮调参
 /set temperature 0.3      直接设置
+/set top_p 0.9
+/set top_k 40
+/set repeat_penalty 1.1
 /set max_tokens 4096
 /set stream off
+/sessions                 查看会话列表（可切换/删除）
+/newchat                  新建会话
+/use <会话ID>             切换到历史会话继续聊
+/delsession <会话ID>      删除会话（不带参数删当前）
 /reset                    清空对话历史
 /stats                    查看配置和 token 用量
 /id                       查询自己的 user id（用于白名单）
 ```
 
-直接发文字 = 聊天；直接发图片 = 视觉问答（caption 作为问题，没有 caption 会默认问"请描述这张图片"）。
+直接发文字 = 聊天；直接发图片 = 视觉问答（caption 作为问题，没有 caption 会默认问"请描述这张图片"）。  
+切换到历史会话（`/use` 或 `/sessions` 按钮）时，Bot 会自动发送会话摘要，帮助快速衔接上下文。
 
 ## 五、Todo
 

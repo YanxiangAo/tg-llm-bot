@@ -36,6 +36,8 @@ class LLMClient:
         messages: list[dict[str, Any]],
         temperature: float,
         top_p: float,
+        top_k: int,
+        repeat_penalty: float,
         max_tokens: int,
     ) -> tuple[str, int, int]:
         """Non-streaming chat. Returns (text, prompt_tokens, completion_tokens)."""
@@ -45,6 +47,10 @@ class LLMClient:
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            extra_body={
+                "top_k": top_k,
+                "repeat_penalty": repeat_penalty,
+            },
             stream=False,
         )
         text = resp.choices[0].message.content or ""
@@ -60,6 +66,8 @@ class LLMClient:
         messages: list[dict[str, Any]],
         temperature: float,
         top_p: float,
+        top_k: int,
+        repeat_penalty: float,
         max_tokens: int,
     ) -> AsyncIterator[tuple[str, int, int]]:
         """Streaming chat. Yields (delta_text, prompt_tokens, completion_tokens).
@@ -73,6 +81,10 @@ class LLMClient:
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            extra_body={
+                "top_k": top_k,
+                "repeat_penalty": repeat_penalty,
+            },
             stream=True,
             stream_options={"include_usage": True},
         )
