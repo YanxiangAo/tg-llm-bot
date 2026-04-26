@@ -1,6 +1,7 @@
 # tg-llm-bot
 
 [English README](./README_EN.md)
+[Changelog](./CHANGELOG.md)
 
 一个连接到 OpenAI 兼容 API 的 Telegram Bot，支持：
 
