@@ -1,5 +1,7 @@
 # tg-llm-bot
 
+[English README](./README_EN.md)
+
 一个连接到 OpenAI 兼容 API 的 Telegram Bot，支持：
 
 - 切换模型 (`/model`)
@@ -70,7 +72,13 @@ docker compose logs -f
 
 直接发文字 = 聊天；直接发图片 = 视觉问答（caption 作为问题，没有 caption 会默认问"请描述这张图片"）。
 
-## 五、维护
+## 五、Todo
+
+- [ ] 支持在 Telegram `channel` 中使用机器人（含权限与消息来源识别）。
+- [ ] 支持在 Telegram `group/supergroup` 中使用机器人（@提及触发、回复触发、群内权限控制）。
+- [ ] 支持“显式思维链”展示模式（可开关，默认关闭）。
+
+## 六、维护
 
 ```bash
 docker compose ps                          # 看状态
@@ -81,13 +89,13 @@ docker compose down && docker compose up -d --build   # 改完代码重新构建
 
 用户配置和历史都保存在 `./data/users.json`，删除该文件相当于重置所有用户状态。
 
-## 六、安全提示
+## 七、安全提示
 
 - **强烈建议配置 `ALLOWED_USER_IDS`**，否则任何拿到 Bot 用户名的人都能消耗你的 API 额度。
 - `.env` 包含密钥，不要提交到 git。
 - 服务使用 `network_mode: host` 是为了直接连本机的 `127.0.0.1:3001` (new-api)。Bot 本身不监听任何端口，只主动外连 Telegram，因此公网攻击面很小。
 
-## 七、目录结构
+## 八、目录结构
 
 ```
 tg-llm-bot/
