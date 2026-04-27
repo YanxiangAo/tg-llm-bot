@@ -98,11 +98,17 @@ def _build_messages(state: UserState, user_content: Any) -> list[dict[str, Any]]
     return msgs
 
 
-async def _waiting_indicator_loop(msg, stop_event: asyncio.Event) -> None:
-    """Update a waiting message every second until stop_event is set."""
+async def _waiting_indicator_loop(
+    msg,
+    stop_event: asyncio.Event,
+    cancel_event: asyncio.Event | None = None,
+) -> None:
+    """Update a waiting message every second until stopped or cancelled."""
     started_at = time.monotonic()
     last_elapsed = -1
-    while not stop_event.is_set():
+    while True:
+        if stop_event.is_set() or (cancel_event is not None and cancel_event.is_set()):
+            break
         elapsed = int(time.monotonic() - started_at)
         if elapsed != last_elapsed:
             await _safe_edit(msg, f"⏳ 正在思考中... {elapsed}s")
@@ -128,30 +134,31 @@ HELP_TEXT = (
     "/start 显示欢迎\n"
     "/help 显示本帮助\n"
     "/id 查看你的 Telegram user id（用于白名单）\n"
+    "/stop 终止当前正在生成的回复\n"
     "\n"
     "*会话*\n"
     "/sessions 查看历史会话列表\n"
     "/newchat 新建会话\n"
     "/use <会话ID> 切换并继续某个历史会话\n"
     "/delsession <会话ID> 删除会话（不带参数则删当前）\n"
-    "/reset 清空当前对话历史\n"
     "/stats 查看当前配置 + Token 用量\n"
     "\n"
     "*模型与提示词*\n"
     "/model 切换模型（按钮选择）\n"
     "/system 查看当前系统提示词\n"
-    "/system <内容> 设置系统提示词（会清空历史）\n"
+    "/system <内容> 设置系统提示词\n"
     "/system clear 清空系统提示词\n"
     "/preset 选择预置系统提示词\n"
     "\n"
     "*采样参数*\n"
-    "/params 用按钮微调 temperature / top\\_p / top\\_k / repeat\\_penalty / max\\_tokens / stream\n"
+    "/params 用按钮微调 temperature / top\\_p / repeat\\_penalty / max\\_tokens / stream / web\\_search / thinking\n"
     "/set temperature 0.7\n"
     "/set top\\_p 0.9\n"
-    "/set top\\_k 40\n"
     "/set repeat\\_penalty 1.1\n"
     "/set max\\_tokens 4096\n"
     "/set stream on|off\n"
+    "/set web\\_search on|off\n"
+    "/set thinking on|off\n"
 )
 
 
@@ -248,6 +255,21 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @auth_required
 async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _render_sessions(update, context, update.effective_user.id)
+
+
+@auth_required
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    active = context.application.bot_data.setdefault("active_generations", {})
+    run = active.get(update.effective_user.id)
+    if not run:
+        await update.message.reply_text("当前没有正在生成的回复。")
+        return
+    cancel_event: asyncio.Event = run["cancel_event"]
+    task: asyncio.Task = run["task"]
+    cancel_event.set()
+    if not task.done():
+        task.cancel()
+    await update.message.reply_text("⏹️ 已请求停止当前任务（思考/回复）。")
 
 
 @auth_required
@@ -430,12 +452,12 @@ async def cmd_system(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     new_prompt = args_text[1].strip()
     if new_prompt.lower() == "clear":
-        await storage.update(update.effective_user.id, system_prompt="", history=[])
-        await update.message.reply_text("✅ 系统提示词已清空，对话历史已重置。")
+        await storage.update(update.effective_user.id, system_prompt="")
+        await update.message.reply_text("✅ 系统提示词已清空。")
         return
 
-    await storage.update(update.effective_user.id, system_prompt=new_prompt, history=[])
-    await update.message.reply_text("✅ 系统提示词已更新，对话历史已重置。")
+    await storage.update(update.effective_user.id, system_prompt=new_prompt)
+    await update.message.reply_text("✅ 系统提示词已更新。")
 
 
 @auth_required
@@ -445,7 +467,7 @@ async def cmd_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         for key, (name, _) in PRESETS.items()
     ]
     await update.message.reply_text(
-        "选择一个预设系统提示词（会清空对话历史）：",
+        "选择一个预设系统提示词：",
         reply_markup=InlineKeyboardMarkup(rows),
     )
 
@@ -464,7 +486,7 @@ async def cb_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     name, prompt = PRESETS[key]
     storage: Storage = context.application.bot_data["storage"]
-    await storage.update(q.from_user.id, system_prompt=prompt, history=[])
+    await storage.update(q.from_user.id, system_prompt=prompt)
     await q.edit_message_text(
         f"✅ 已切换到预设「{name}」。\n\n系统提示词：\n{prompt}"
     )
@@ -477,7 +499,6 @@ async def cb_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 PARAM_BOUNDS = {
     "temperature": (0.0, 2.0, 0.1),
     "top_p": (0.0, 1.0, 0.05),
-    "top_k": (1, 200, 5),
     "repeat_penalty": (0.8, 2.0, 0.05),
     "max_tokens": (256, 32768, 512),
 }
@@ -494,13 +515,24 @@ def _params_keyboard(state: UserState) -> InlineKeyboardMarkup:
     rows = [
         row("temperature", state.temperature, ".2f"),
         row("top_p", state.top_p, ".2f"),
-        row("top_k", state.top_k, "d"),
         row("repeat_penalty", state.repeat_penalty, ".2f"),
         row("max_tokens", state.max_tokens, "d"),
         [
             InlineKeyboardButton(
                 f"stream: {'on ✅' if state.stream else 'off ❌'} (点击切换)",
                 callback_data="param:stream:toggle",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"web_search: {'on ✅' if state.web_search else 'off ❌'} (点击切换)",
+                callback_data="param:web_search:toggle",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"thinking: {'on ✅' if state.thinking else 'off ❌'} (点击切换)",
+                callback_data="param:thinking:toggle",
             )
         ],
         [InlineKeyboardButton("关闭", callback_data="param:_:close")],
@@ -513,10 +545,11 @@ def _params_text(state: UserState) -> str:
         "*采样参数*\n"
         f"temperature = `{state.temperature:.2f}`  范围 0.0–2.0\n"
         f"top\\_p = `{state.top_p:.2f}`  范围 0.0–1.0\n"
-        f"top\\_k = `{state.top_k}`  范围 1–200\n"
         f"repeat\\_penalty = `{state.repeat_penalty:.2f}`  范围 0.8–2.0\n"
         f"max\\_tokens = `{state.max_tokens}`  范围 256–32768\n"
         f"stream = `{state.stream}`\n"
+        f"web\\_search = `{state.web_search}`\n"
+        f"thinking = `{state.thinking}`\n"
     )
 
 
@@ -554,6 +587,10 @@ async def cb_param(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if name == "stream" and action == "toggle":
         state = await storage.update(q.from_user.id, stream=not state.stream)
+    elif name == "web_search" and action == "toggle":
+        state = await storage.update(q.from_user.id, web_search=not state.web_search)
+    elif name == "thinking" and action == "toggle":
+        state = await storage.update(q.from_user.id, thinking=not state.thinking)
     elif name in PARAM_BOUNDS and action in {"inc", "dec"}:
         lo, hi, step = PARAM_BOUNDS[name]
         cur = getattr(state, name)
@@ -585,7 +622,7 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(parts) < 3:
         await update.message.reply_text(
             "用法：`/set <key> <value>`\n"
-            "key 支持：`temperature`, `top_p`, `top_k`, `repeat_penalty`, `max_tokens`, `stream`",
+            "key 支持：`temperature`, `top_p`, `repeat_penalty`, `max_tokens`, `stream`, `web_search`, `thinking`",
             parse_mode="Markdown",
         )
         return
@@ -597,6 +634,16 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             state = await storage.update(update.effective_user.id, stream=val)
             await update.message.reply_text(f"✅ stream = `{state.stream}`", parse_mode="Markdown")
             return
+        if key == "web_search":
+            val = raw.lower() in {"on", "true", "1", "yes"}
+            state = await storage.update(update.effective_user.id, web_search=val)
+            await update.message.reply_text(f"✅ web_search = `{state.web_search}`", parse_mode="Markdown")
+            return
+        if key == "thinking":
+            val = raw.lower() in {"on", "true", "1", "yes"}
+            state = await storage.update(update.effective_user.id, thinking=val)
+            await update.message.reply_text(f"✅ thinking = `{state.thinking}`", parse_mode="Markdown")
+            return
         if key in {"temperature", "top_p", "repeat_penalty"}:
             v = float(raw)
             lo, hi, _ = PARAM_BOUNDS[key]
@@ -605,7 +652,7 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             state = await storage.update(update.effective_user.id, **{key: v})
             await update.message.reply_text(f"✅ {key} = `{v:.3f}`", parse_mode="Markdown")
             return
-        if key in {"max_tokens", "top_k"}:
+        if key == "max_tokens":
             v = int(raw)
             lo, hi, _ = PARAM_BOUNDS[key]
             if not (lo <= v <= hi):
@@ -619,21 +666,26 @@ async def cmd_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# /reset /stats
+# /stats
 # --------------------------------------------------------------------------- #
-
-
-@auth_required
-async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    storage: Storage = context.application.bot_data["storage"]
-    await storage.reset_history(update.effective_user.id)
-    await update.message.reply_text("🧹 对话历史已清空。")
-
 
 @auth_required
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.application.bot_data["storage"]
+    llm: LLMClient = context.application.bot_data["llm"]
     state = await storage.get(update.effective_user.id)
+    support = llm.get_web_search_support(state.model)
+    thinking_support = llm.get_thinking_support(state.model)
+    support_text = "unknown"
+    if support is True:
+        support_text = "supported"
+    elif support is False:
+        support_text = "unsupported"
+    thinking_support_text = "unknown"
+    if thinking_support is True:
+        thinking_support_text = "supported"
+    elif thinking_support is False:
+        thinking_support_text = "unsupported"
     sp = state.system_prompt
     sp_short = (sp[:80] + "…") if len(sp) > 80 else sp
     session_title = _summarize_title(
@@ -647,8 +699,10 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"模型: `{state.model}`\n"
         f"系统提示词: `{sp_short or '(空)'}`\n"
         f"temperature=`{state.temperature:.2f}` top\\_p=`{state.top_p:.2f}` "
-        f"top\\_k=`{state.top_k}` repeat\\_penalty=`{state.repeat_penalty:.2f}` "
-        f"max\\_tokens=`{state.max_tokens}` stream=`{state.stream}`\n"
+        f"repeat\\_penalty=`{state.repeat_penalty:.2f}` "
+        f"max\\_tokens=`{state.max_tokens}` stream=`{state.stream}` web\\_search=`{state.web_search}` thinking=`{state.thinking}`\n"
+        f"web search 支持探测: `{support_text}`\n"
+        f"thinking 支持探测: `{thinking_support_text}`\n"
         f"历史消息数: `{len(state.history)}`\n\n"
         "*累计用量*\n"
         f"请求数: `{state.total_requests}`\n"
@@ -709,6 +763,13 @@ async def _do_chat(
     storage: Storage = context.application.bot_data["storage"]
     llm: LLMClient = context.application.bot_data["llm"]
     user_id = update.effective_user.id
+    active = context.application.bot_data.setdefault("active_generations", {})
+    running = active.get(user_id)
+    if running and not running["task"].done():
+        await update.message.reply_text("你有一条回复还在生成中，可先用 /stop 终止。")
+        return
+    cancel_event = asyncio.Event()
+    active[user_id] = {"task": asyncio.current_task(), "cancel_event": cancel_event}
     state = await storage.get(user_id)
 
     messages = _build_messages(state, user_content)
@@ -720,12 +781,18 @@ async def _do_chat(
 
     try:
         if state.stream:
-            await _do_chat_stream(update, context, state, messages, history_user_msg)
+            await _do_chat_stream(update, context, state, messages, history_user_msg, cancel_event)
         else:
-            await _do_chat_once(update, context, state, messages, history_user_msg)
+            await _do_chat_once(update, context, state, messages, history_user_msg, cancel_event)
+    except asyncio.CancelledError:
+        log.info("chat cancelled for user %s", user_id)
     except Exception as e:
         log.exception("chat failed")
         await update.message.reply_text(f"❌ 调用模型失败：{e}")
+    finally:
+        run = active.get(user_id)
+        if run and run["task"] is asyncio.current_task():
+            active.pop(user_id, None)
 
 
 async def _do_chat_once(
@@ -734,13 +801,20 @@ async def _do_chat_once(
     state: UserState,
     messages: list[dict[str, Any]],
     history_user_msg: dict[str, Any],
+    cancel_event: asyncio.Event,
 ) -> None:
     cfg: Config = context.application.bot_data["cfg"]
     storage: Storage = context.application.bot_data["storage"]
     llm: LLMClient = context.application.bot_data["llm"]
     waiting_msg = await update.message.reply_text("⏳ 正在思考中... 0s", disable_web_page_preview=True)
     waiting_stop = asyncio.Event()
-    waiting_task = asyncio.create_task(_waiting_indicator_loop(waiting_msg, waiting_stop))
+    waiting_task = asyncio.create_task(_waiting_indicator_loop(waiting_msg, waiting_stop, cancel_event))
+
+    if cancel_event.is_set():
+        waiting_stop.set()
+        await waiting_task
+        await _safe_edit(waiting_msg, "⏹️ 已停止生成。")
+        return
 
     try:
         text, pt, ct = await llm.chat_once(
@@ -748,13 +822,18 @@ async def _do_chat_once(
             messages=messages,
             temperature=state.temperature,
             top_p=state.top_p,
-            top_k=state.top_k,
             repeat_penalty=state.repeat_penalty,
             max_tokens=state.max_tokens,
+            web_search=state.web_search,
+            thinking=state.thinking,
         )
     finally:
         waiting_stop.set()
         await waiting_task
+
+    if cancel_event.is_set():
+        await _safe_edit(waiting_msg, "⏹️ 已停止生成。")
+        return
 
     if not text:
         text = "(模型返回空内容)"
@@ -779,6 +858,7 @@ async def _do_chat_stream(
     state: UserState,
     messages: list[dict[str, Any]],
     history_user_msg: dict[str, Any],
+    cancel_event: asyncio.Event,
 ) -> None:
     cfg: Config = context.application.bot_data["cfg"]
     storage: Storage = context.application.bot_data["storage"]
@@ -786,13 +866,14 @@ async def _do_chat_stream(
 
     placeholder = await update.message.reply_text("⏳ 正在思考中... 0s", disable_web_page_preview=True)
     waiting_stop = asyncio.Event()
-    waiting_task = asyncio.create_task(_waiting_indicator_loop(placeholder, waiting_stop))
+    waiting_task = asyncio.create_task(_waiting_indicator_loop(placeholder, waiting_stop, cancel_event))
     first_token_received = False
     full = ""
     cur_msg = placeholder
     cur_text = ""
     last_edit = 0.0
     pt, ct = 0, 0
+    stopped = False
 
     try:
         async for delta, p, c in llm.chat_stream(
@@ -800,10 +881,14 @@ async def _do_chat_stream(
             messages=messages,
             temperature=state.temperature,
             top_p=state.top_p,
-            top_k=state.top_k,
             repeat_penalty=state.repeat_penalty,
             max_tokens=state.max_tokens,
+            web_search=state.web_search,
+            thinking=state.thinking,
         ):
+            if cancel_event.is_set():
+                stopped = True
+                break
             if p or c:
                 pt, ct = p or pt, c or ct
             if not delta:
@@ -844,8 +929,13 @@ async def _do_chat_stream(
             await _safe_edit(cur_msg, cur_text)
 
     if not full:
-        await _safe_edit(cur_msg, "(模型返回空内容)")
+        await _safe_edit(cur_msg, "⏹️ 已停止生成。" if stopped else "(模型返回空内容)")
         full = ""
+    elif stopped:
+        await _safe_edit(cur_msg, (cur_text or full)[-TG_TEXT_LIMIT:] + "\n\n⏹️ 已停止")
+
+    if stopped:
+        return
 
     await storage.append_history(
         update.effective_user.id,

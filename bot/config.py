@@ -36,15 +36,17 @@ def _csv(v: str | None) -> list[str]:
 class Config:
     bot_token: str
     api_key: str
+    tavily_api_key: str
     base_url: str
     allowed_user_ids: set[int]
     default_model: str
     available_models: list[str]
     default_temperature: float
     default_top_p: float
-    default_top_k: int
     default_repeat_penalty: float
     default_max_tokens: int
+    web_search_default: bool
+    thinking_default: bool
     max_history_messages: int
     stream_default: bool
     data_dir: Path
@@ -71,15 +73,17 @@ class Config:
         return cls(
             bot_token=token,
             api_key=api_key,
+            tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/"),
             allowed_user_ids=allowed_ids,
             default_model=os.getenv("DEFAULT_MODEL", "gpt-4o-mini").strip(),
             available_models=_csv(os.getenv("AVAILABLE_MODELS")),
             default_temperature=_float(os.getenv("DEFAULT_TEMPERATURE"), 0.7),
             default_top_p=_float(os.getenv("DEFAULT_TOP_P"), 1.0),
-            default_top_k=_int(os.getenv("DEFAULT_TOP_K"), 40),
             default_repeat_penalty=_float(os.getenv("DEFAULT_REPEAT_PENALTY"), 1.0),
             default_max_tokens=_int(os.getenv("DEFAULT_MAX_TOKENS"), 2048),
+            web_search_default=_bool(os.getenv("WEB_SEARCH_DEFAULT"), False),
+            thinking_default=_bool(os.getenv("THINKING_DEFAULT"), False),
             max_history_messages=_int(os.getenv("MAX_HISTORY_MESSAGES"), 20),
             stream_default=_bool(os.getenv("STREAM_DEFAULT"), True),
             data_dir=Path(os.getenv("DATA_DIR", "/data")),

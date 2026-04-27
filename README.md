@@ -7,8 +7,8 @@
 
 - 切换模型 (`/model`)
 - 查看 / 设置系统提示词 (`/system`) + 预设模板 (`/preset`)
-- 微调采样参数 (`/params`：temperature、top_p、top_k、repeat_penalty、max_tokens、stream)
-- 多轮上下文 + 一键清空 (`/reset`)
+- 微调采样参数 (`/params`：temperature、top_p、repeat_penalty、max_tokens、stream、web_search、thinking)
+- 多轮上下文（保留当前会话历史）
 - 多会话管理（查看、切换、删除、自动会话标题）
 - 流式输出（边生成边编辑消息）
 - 生成前动态等待秒数提示（防止误判卡住）
@@ -40,11 +40,13 @@ vim .env   # 填入 token / api_key / base_url / 白名单
 | `TELEGRAM_BOT_TOKEN` | BotFather 给的 token |
 | `OPENAI_API_KEY` | LLM 网关或厂商 key |
 | `OPENAI_BASE_URL` | OpenAI 兼容 endpoint，结尾带 `/v1` |
+| `TAVILY_API_KEY` | 外部网页搜索 key；配置后 `web_search` 会通过工具调用 Tavily |
 | `ALLOWED_USER_IDS` | 逗号分隔的 Telegram 数字 id；留空 = 不限制（**不推荐**） |
 | `DEFAULT_MODEL` | 默认模型名 |
 | `AVAILABLE_MODELS` | 可切换的模型列表，逗号分隔；留空则启动时自动 `GET /v1/models` |
-| `DEFAULT_TOP_K` | 默认 top_k（整数） |
 | `DEFAULT_REPEAT_PENALTY` | 默认 repeat_penalty（浮点） |
+| `WEB_SEARCH_DEFAULT` | 默认是否尝试启用网页搜索（不支持会自动回退） |
+| `THINKING_DEFAULT` | 默认是否开启 thinking 模式（不支持会自动回退） |
 
 ## 三、启动
 
@@ -64,33 +66,35 @@ docker compose logs -f
 ```
 /model                    选模型
 /system                   查看当前系统提示词
-/system 你是一名诗人      设置系统提示词（清空历史）
+/system 你是一名诗人      设置系统提示词
 /system clear             清空系统提示词
 /preset                   选预设模板
 /params                   按钮调参
 /set temperature 0.3      直接设置
 /set top_p 0.9
-/set top_k 40
 /set repeat_penalty 1.1
 /set max_tokens 4096
 /set stream off
+/set web_search on
+/set thinking on
 /sessions                 查看会话列表（可切换/删除）
 /newchat                  新建会话
 /use <会话ID>             切换到历史会话继续聊
 /delsession <会话ID>      删除会话（不带参数删当前）
-/reset                    清空对话历史
 /stats                    查看配置和 token 用量
 /id                       查询自己的 user id（用于白名单）
 ```
 
 直接发文字 = 聊天；直接发图片 = 视觉问答（caption 作为问题，没有 caption 会默认问"请描述这张图片"）。  
 切换到历史会话（`/use` 或 `/sessions` 按钮）时，Bot 会自动发送会话摘要，帮助快速衔接上下文。
+系统提示词与采样参数也会随会话保存，切回会话后会恢复该会话的原值。
+thinking 模式支持按模型自动探测：不支持时会自动回退并缓存结果。  
+`web_search` 开启且配置了 `TAVILY_API_KEY` 时，模型会通过工具调用外部搜索（Tavily）再组织答案。
 
 ## 五、Todo
 
 - [ ] 支持在 Telegram `channel` 中使用机器人（含权限与消息来源识别）。
 - [ ] 支持在 Telegram `group/supergroup` 中使用机器人（@提及触发、回复触发、群内权限控制）。
-- [ ] 支持“显式思维链”展示模式（可开关，默认关闭）。
 
 ## 六、维护
 
@@ -118,6 +122,7 @@ tg-llm-bot/
 │   ├── llm.py         # OpenAI 异步客户端封装
 │   ├── storage.py     # 每用户状态持久化（JSON 文件）
 │   ├── presets.py     # 预设系统提示词
+│   ├── tools/         # 外部工具（如 Tavily）
 │   ├── handlers.py    # 命令 / 按钮 / 消息处理
 │   └── main.py        # Application 装配 + 入口
 ├── data/              # 运行时持久化目录（挂载进容器）

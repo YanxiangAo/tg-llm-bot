@@ -28,8 +28,8 @@ from .handlers import (
     cmd_preset,
     cmd_sessions,
     cmd_delsession,
-    cmd_reset,
     cmd_set,
+    cmd_stop,
     cmd_start,
     cmd_stats,
     cmd_system,
@@ -63,13 +63,13 @@ async def _post_init(app: Application) -> None:
         [
             BotCommand("start", "欢迎"),
             BotCommand("help", "查看所有命令"),
+            BotCommand("stop", "停止当前生成"),
             BotCommand("model", "切换模型"),
             BotCommand("sessions", "查看和切换历史会话"),
             BotCommand("system", "查看/设置系统提示词"),
             BotCommand("preset", "选择预设系统提示词"),
             BotCommand("params", "调节采样参数"),
             BotCommand("set", "/set <key> <value>"),
-            BotCommand("reset", "清空对话历史"),
             BotCommand("stats", "查看配置与 token 用量"),
             BotCommand("id", "查看你的 user id"),
         ]
@@ -91,13 +91,14 @@ def build_app(cfg: Config) -> Application:
             system_prompt="",
             temperature=cfg.default_temperature,
             top_p=cfg.default_top_p,
-            top_k=cfg.default_top_k,
             repeat_penalty=cfg.default_repeat_penalty,
             max_tokens=cfg.default_max_tokens,
             stream=cfg.stream_default,
+            web_search=cfg.web_search_default,
+            thinking=cfg.thinking_default,
         ),
     )
-    llm = LLMClient(api_key=cfg.api_key, base_url=cfg.base_url)
+    llm = LLMClient(api_key=cfg.api_key, base_url=cfg.base_url, tavily_api_key=cfg.tavily_api_key)
 
     app = (
         Application.builder()
@@ -112,6 +113,7 @@ def build_app(cfg: Config) -> Application:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("model", cmd_model))
     app.add_handler(CommandHandler("sessions", cmd_sessions))
@@ -122,7 +124,6 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("preset", cmd_preset))
     app.add_handler(CommandHandler("params", cmd_params))
     app.add_handler(CommandHandler("set", cmd_set))
-    app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("settings", cmd_stats))
 

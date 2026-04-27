@@ -20,10 +20,11 @@ class UserState:
     system_prompt: str
     temperature: float
     top_p: float
-    top_k: int
     repeat_penalty: float
     max_tokens: int
     stream: bool
+    web_search: bool
+    thinking: bool
     history: list[dict[str, Any]] = field(default_factory=list)
     sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
     active_session_id: str = ""
@@ -38,10 +39,11 @@ class UserState:
             "system_prompt": self.system_prompt,
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "top_k": self.top_k,
             "repeat_penalty": self.repeat_penalty,
             "max_tokens": self.max_tokens,
             "stream": self.stream,
+            "web_search": self.web_search,
+            "thinking": self.thinking,
             "history": self.history,
             "sessions": self.sessions,
             "active_session_id": self.active_session_id,
@@ -58,10 +60,11 @@ class UserState:
             system_prompt=d.get("system_prompt", defaults.system_prompt),
             temperature=float(d.get("temperature", defaults.temperature)),
             top_p=float(d.get("top_p", defaults.top_p)),
-            top_k=int(d.get("top_k", defaults.top_k)),
             repeat_penalty=float(d.get("repeat_penalty", defaults.repeat_penalty)),
             max_tokens=int(d.get("max_tokens", defaults.max_tokens)),
             stream=bool(d.get("stream", defaults.stream)),
+            web_search=bool(d.get("web_search", defaults.web_search)),
+            thinking=bool(d.get("thinking", defaults.thinking)),
             history=list(d.get("history", [])),
             sessions=dict(d.get("sessions", {})),
             active_session_id=str(d.get("active_session_id", "")),
@@ -84,6 +87,17 @@ class Storage:
         self._users: dict[int, UserState] = {}
         self._load()
 
+    _SESSION_CFG_KEYS = (
+        "system_prompt",
+        "temperature",
+        "top_p",
+        "repeat_penalty",
+        "max_tokens",
+        "stream",
+        "web_search",
+        "thinking",
+    )
+
     def _load(self) -> None:
         if not self._file.exists():
             return
@@ -104,7 +118,30 @@ class Storage:
     def _new_session(self, title: str = "新会话") -> tuple[str, dict[str, Any]]:
         sid = uuid.uuid4().hex[:8]
         now = time.time()
-        return sid, {"id": sid, "title": title, "history": [], "created_at": now, "updated_at": now}
+        return sid, {
+            "id": sid,
+            "title": title,
+            "history": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def _copy_cfg_from_state(self, st: UserState) -> dict[str, Any]:
+        return {k: getattr(st, k) for k in self._SESSION_CFG_KEYS}
+
+    def _hydrate_session_cfg(self, st: UserState, sess: dict[str, Any]) -> None:
+        # Backward compatibility: old sessions may not have per-session config fields.
+        for k in self._SESSION_CFG_KEYS:
+            if k not in sess:
+                sess[k] = getattr(st, k)
+
+    def _sync_active_session(self, st: UserState) -> None:
+        self._ensure_sessions(st)
+        sess = st.sessions[st.active_session_id]
+        self._hydrate_session_cfg(st, sess)
+        st.history = list(sess.get("history", []))
+        for k in self._SESSION_CFG_KEYS:
+            setattr(st, k, sess.get(k))
 
     def _ensure_sessions(self, st: UserState) -> None:
         if not isinstance(st.sessions, dict):
@@ -113,16 +150,20 @@ class Storage:
             sid, sess = self._new_session("新会话")
             st.sessions[sid] = sess
             st.active_session_id = sid
+        for sess in st.sessions.values():
+            if isinstance(sess, dict):
+                self._hydrate_session_cfg(st, sess)
         if st.active_session_id not in st.sessions:
             st.active_session_id = next(iter(st.sessions.keys()))
 
     def _sync_legacy_history(self, st: UserState) -> None:
         self._ensure_sessions(st)
         active = st.sessions[st.active_session_id]
+        self._hydrate_session_cfg(st, active)
         if st.history and not active.get("history"):
             active["history"] = list(st.history)
             active["updated_at"] = time.time()
-        st.history = list(active.get("history", []))
+        self._sync_active_session(st)
 
     async def _persist(self) -> None:
         data = {str(uid): st.to_dict() for uid, st in self._users.items()}
@@ -150,12 +191,17 @@ class Storage:
         async with self._lock:
             st = self._users.get(user_id) or copy.deepcopy(self._defaults)
             self._ensure_sessions(st)
+            sess = st.sessions[st.active_session_id]
+            self._hydrate_session_cfg(st, sess)
             for k, v in fields.items():
                 if hasattr(st, k):
                     setattr(st, k, v)
+                if k in self._SESSION_CFG_KEYS:
+                    sess[k] = v
             if "history" in fields:
-                sess = st.sessions[st.active_session_id]
                 sess["history"] = list(fields["history"] or [])
+                sess["updated_at"] = time.time()
+            if any(k in self._SESSION_CFG_KEYS for k in fields):
                 sess["updated_at"] = time.time()
             self._sync_legacy_history(st)
             self._users[user_id] = st
@@ -222,9 +268,11 @@ class Storage:
             st = self._users.get(user_id) or copy.deepcopy(self._defaults)
             self._ensure_sessions(st)
             sid, sess = self._new_session(title)
+            # New sessions inherit current config for convenience.
+            sess.update(self._copy_cfg_from_state(st))
             st.sessions[sid] = sess
             st.active_session_id = sid
-            st.history = []
+            self._sync_active_session(st)
             self._users[user_id] = st
             await self._persist()
             return sess
@@ -238,7 +286,7 @@ class Storage:
             if session_id not in st.sessions:
                 return False
             st.active_session_id = session_id
-            st.history = list(st.sessions[session_id].get("history", []))
+            self._sync_active_session(st)
             await self._persist()
             return True
 
@@ -256,6 +304,6 @@ class Storage:
                 st.sessions[sid] = sess
             if st.active_session_id == session_id:
                 st.active_session_id = next(iter(st.sessions.keys()))
-            st.history = list(st.sessions[st.active_session_id].get("history", []))
+            self._sync_active_session(st)
             await self._persist()
             return True, st.active_session_id

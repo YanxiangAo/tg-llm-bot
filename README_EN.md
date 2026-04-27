@@ -6,8 +6,8 @@ A Telegram bot connected to any OpenAI-compatible API, with support for:
 
 - Model switching (`/model`)
 - System prompt management (`/system`) + prompt presets (`/preset`)
-- Parameter tuning (`/params`: temperature, top_p, top_k, repeat_penalty, max_tokens, stream)
-- Multi-turn context + one-command reset (`/reset`)
+- Parameter tuning (`/params`: temperature, top_p, repeat_penalty, max_tokens, stream, web_search, thinking)
+- Multi-turn context (history kept in current session)
 - Multi-session management (list, switch, delete, auto titles)
 - Streaming replies (edit message while generating)
 - Dynamic waiting seconds before first token (to show bot is alive)
@@ -39,11 +39,13 @@ Key variables:
 | `TELEGRAM_BOT_TOKEN` | Token from BotFather |
 | `OPENAI_API_KEY` | API key for your LLM provider/gateway |
 | `OPENAI_BASE_URL` | OpenAI-compatible endpoint, usually ending with `/v1` |
+| `TAVILY_API_KEY` | External web-search key; with this set, `web_search` uses Tavily tool-calling |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram numeric user IDs; empty means no restriction (**not recommended**) |
 | `DEFAULT_MODEL` | Default model ID |
 | `AVAILABLE_MODELS` | Keep empty to fetch from `GET /v1/models` dynamically |
-| `DEFAULT_TOP_K` | Default top_k integer |
 | `DEFAULT_REPEAT_PENALTY` | Default repeat penalty float |
+| `WEB_SEARCH_DEFAULT` | Try web search by default (auto-fallback if unsupported) |
+| `THINKING_DEFAULT` | Enable thinking mode by default (auto-fallback if unsupported) |
 
 ## 3) Start
 
@@ -64,21 +66,21 @@ Send these commands to the bot:
 ```text
 /model                    choose model
 /system                   show current system prompt
-/system You are a poet    set system prompt (resets history)
+/system You are a poet    set system prompt
 /system clear             clear system prompt
 /preset                   choose prompt preset
 /params                   tune parameters with inline buttons
 /set temperature 0.3      set parameter directly
 /set top_p 0.9
-/set top_k 40
 /set repeat_penalty 1.1
 /set max_tokens 4096
 /set stream off
+/set web_search on
+/set thinking on
 /sessions                 list sessions (switch/delete)
 /newchat                  create a new session
 /use <session_id>         continue an old session
 /delsession <session_id>  delete a session (no arg = current)
-/reset                    clear conversation history
 /stats                    show session config and token usage
 /id                       show your Telegram user ID
 ```
@@ -86,6 +88,9 @@ Send these commands to the bot:
 Send text = normal chat.  
 Send image = vision chat (caption is used as the question).  
 When switching sessions (`/use` or `/sessions` button), the bot also sends a short conversation summary for quick context recovery.
+System prompt and sampling parameters are also session-scoped and restored when you switch back.
+Thinking-mode support is auto-detected per model, with fallback when unsupported.  
+When `web_search` is on and `TAVILY_API_KEY` is configured, the model can call an external Tavily web-search tool before finalizing the answer.
 
 ## 5) Todo
 
@@ -120,6 +125,7 @@ tg-llm-bot/
 │   ├── llm.py
 │   ├── storage.py
 │   ├── presets.py
+│   ├── tools/
 │   ├── handlers.py
 │   └── main.py
 ├── data/

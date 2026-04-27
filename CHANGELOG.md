@@ -5,8 +5,16 @@ This file documents notable changes to the project.
 
 ## [Unreleased] / 未发布
 
-- 暂无。  
-- No entries yet.
+- 会话行为调整：移除 `/reset` 命令；切换/清空系统提示词与切换预设不再清空历史。  
+  Session behavior updated: removed `/reset`; changing/clearing system prompts and switching presets no longer clear history.
+- 会话级配置：系统提示词与采样参数改为随会话保存，切换回会话时自动恢复。  
+  Session-scoped settings: system prompt and sampling parameters are stored per session and restored on session switch.
+- 新增 `thinking` 开关：支持 `/params` 与 `/set thinking on|off`，并按模型缓存支持探测结果。  
+  Added `thinking` toggle via `/params` and `/set thinking on|off`, with per-model support detection cache.
+- `web_search` 升级为外部工具调用：配置 `TAVILY_API_KEY` 后，模型可通过 tool calling 调用 Tavily 搜索；不支持时自动降级回退。  
+  `web_search` upgraded to external tool-calling: with `TAVILY_API_KEY`, models can call Tavily via tool calling, with graceful fallback on unsupported paths.
+- `/stop` 行为增强：在“思考中动态秒数提示”阶段也可立即终止。  
+  `/stop` improved: now also interrupts during the pre-response “thinking seconds” stage.
 
 ## [v1.0.0] - 2026-04-26
 
