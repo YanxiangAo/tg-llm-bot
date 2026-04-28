@@ -26,20 +26,26 @@ from .handlers import (
     cmd_newchat,
     cmd_params,
     cmd_preset,
+    cmd_ragfiles,
     cmd_sessions,
     cmd_delsession,
     cmd_set,
+    cmd_summary,
     cmd_stop,
     cmd_start,
     cmd_stats,
     cmd_system,
     cmd_use,
     on_error,
+    on_document,
     on_photo,
     on_text,
 )
 from .llm import LLMClient
+from .rag import RagStore
 from .storage import Storage, UserState
+from .tools.base import ToolManager
+from .tools.tavily_tool import TavilyWebSearchTool
 
 
 log = logging.getLogger("tg-llm-bot")
@@ -66,6 +72,8 @@ async def _post_init(app: Application) -> None:
             BotCommand("stop", "停止当前生成"),
             BotCommand("model", "切换模型"),
             BotCommand("sessions", "查看和切换历史会话"),
+            BotCommand("summary", "查看当前会话压缩摘要"),
+            BotCommand("ragfiles", "查看已上传知识库文件"),
             BotCommand("system", "查看/设置系统提示词"),
             BotCommand("preset", "选择预设系统提示词"),
             BotCommand("params", "调节采样参数"),
@@ -88,6 +96,8 @@ def build_app(cfg: Config) -> Application:
         cfg.data_dir,
         UserState(
             model=cfg.default_model,
+            summary_model=cfg.summary_model or cfg.default_model,
+            embedding_model=cfg.embedding_model,
             system_prompt="",
             temperature=cfg.default_temperature,
             top_p=cfg.default_top_p,
@@ -96,9 +106,22 @@ def build_app(cfg: Config) -> Application:
             stream=cfg.stream_default,
             web_search=cfg.web_search_default,
             thinking=cfg.thinking_default,
+            prompt_cache=cfg.prompt_cache_default,
+            rag_enabled=cfg.rag_enabled_default,
         ),
     )
-    llm = LLMClient(api_key=cfg.api_key, base_url=cfg.base_url, tavily_api_key=cfg.tavily_api_key)
+    tools = ToolManager(
+        timeout_seconds=cfg.tool_timeout_seconds,
+        max_calls_per_request=cfg.tool_max_calls_per_request,
+    )
+    tools.register(TavilyWebSearchTool(cfg.tavily_api_key))
+    tools.set_enabled_names(cfg.tools_enabled)
+    llm = LLMClient(
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
+        tool_manager=tools,
+    )
+    rag = RagStore(cfg.data_dir)
 
     app = (
         Application.builder()
@@ -110,6 +133,7 @@ def build_app(cfg: Config) -> Application:
     app.bot_data["cfg"] = cfg
     app.bot_data["storage"] = storage
     app.bot_data["llm"] = llm
+    app.bot_data["rag"] = rag
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -120,6 +144,8 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("newchat", cmd_newchat))
     app.add_handler(CommandHandler("use", cmd_use))
     app.add_handler(CommandHandler("delsession", cmd_delsession))
+    app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("ragfiles", cmd_ragfiles))
     app.add_handler(CommandHandler("system", cmd_system))
     app.add_handler(CommandHandler("preset", cmd_preset))
     app.add_handler(CommandHandler("params", cmd_params))
@@ -133,6 +159,7 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CallbackQueryHandler(cb_param, pattern=r"^param:"))
 
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     app.add_error_handler(on_error)

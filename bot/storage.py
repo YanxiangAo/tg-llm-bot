@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 @dataclass
 class UserState:
     model: str
+    summary_model: str
+    embedding_model: str
     system_prompt: str
     temperature: float
     top_p: float
@@ -25,6 +27,8 @@ class UserState:
     stream: bool
     web_search: bool
     thinking: bool
+    prompt_cache: bool
+    rag_enabled: bool
     history: list[dict[str, Any]] = field(default_factory=list)
     sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
     active_session_id: str = ""
@@ -36,6 +40,8 @@ class UserState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "model": self.model,
+            "summary_model": self.summary_model,
+            "embedding_model": self.embedding_model,
             "system_prompt": self.system_prompt,
             "temperature": self.temperature,
             "top_p": self.top_p,
@@ -44,6 +50,8 @@ class UserState:
             "stream": self.stream,
             "web_search": self.web_search,
             "thinking": self.thinking,
+            "prompt_cache": self.prompt_cache,
+            "rag_enabled": self.rag_enabled,
             "history": self.history,
             "sessions": self.sessions,
             "active_session_id": self.active_session_id,
@@ -57,6 +65,8 @@ class UserState:
     def from_dict(cls, d: dict[str, Any], defaults: "UserState") -> "UserState":
         return cls(
             model=d.get("model", defaults.model),
+            summary_model=d.get("summary_model", defaults.summary_model),
+            embedding_model=d.get("embedding_model", defaults.embedding_model),
             system_prompt=d.get("system_prompt", defaults.system_prompt),
             temperature=float(d.get("temperature", defaults.temperature)),
             top_p=float(d.get("top_p", defaults.top_p)),
@@ -65,6 +75,8 @@ class UserState:
             stream=bool(d.get("stream", defaults.stream)),
             web_search=bool(d.get("web_search", defaults.web_search)),
             thinking=bool(d.get("thinking", defaults.thinking)),
+            prompt_cache=bool(d.get("prompt_cache", defaults.prompt_cache)),
+            rag_enabled=bool(d.get("rag_enabled", defaults.rag_enabled)),
             history=list(d.get("history", [])),
             sessions=dict(d.get("sessions", {})),
             active_session_id=str(d.get("active_session_id", "")),
@@ -88,6 +100,9 @@ class Storage:
         self._load()
 
     _SESSION_CFG_KEYS = (
+        "model",
+        "summary_model",
+        "embedding_model",
         "system_prompt",
         "temperature",
         "top_p",
@@ -96,6 +111,8 @@ class Storage:
         "stream",
         "web_search",
         "thinking",
+        "prompt_cache",
+        "rag_enabled",
     )
 
     def _load(self) -> None:
@@ -262,6 +279,54 @@ class Storage:
             sessions = list(st.sessions.values())
             sessions.sort(key=lambda x: float(x.get("updated_at", 0.0)), reverse=True)
             return sessions
+
+    async def get_active_session_snapshot(
+        self, user_id: int
+    ) -> tuple[str, list[dict[str, Any]], str]:
+        async with self._lock:
+            st = self._users.get(user_id)
+            if st is None:
+                st = copy.deepcopy(self._defaults)
+                self._ensure_sessions(st)
+                self._sync_legacy_history(st)
+                self._users[user_id] = st
+            self._ensure_sessions(st)
+            sess = st.sessions[st.active_session_id]
+            history = list(sess.get("history", []))
+            summary = str(sess.get("summary", "") or "")
+            return st.active_session_id, history, summary
+
+    async def set_session_summary_and_trim(
+        self,
+        user_id: int,
+        session_id: str,
+        summary: str,
+        keep_recent: int,
+        title: str | None = None,
+    ) -> bool:
+        async with self._lock:
+            st = self._users.get(user_id)
+            if st is None:
+                return False
+            self._ensure_sessions(st)
+            sess = st.sessions.get(session_id)
+            if not sess:
+                return False
+            hist = list(sess.get("history", []))
+            if keep_recent > 0 and len(hist) > keep_recent:
+                hist = hist[-keep_recent:]
+            sess["history"] = hist
+            sess["summary"] = summary.strip()
+            if title is not None:
+                t = str(title).strip()
+                if t:
+                    sess["title"] = t
+            sess["updated_at"] = time.time()
+            if st.active_session_id == session_id:
+                st.history = list(hist)
+            self._users[user_id] = st
+            await self._persist()
+            return True
 
     async def create_session(self, user_id: int, title: str = "新会话") -> dict[str, Any]:
         async with self._lock:

@@ -1,5 +1,7 @@
 services:
   tg-llm-bot:
+    build:
+      context: .
     image: otis49482/tg-llm-bot:latest
     container_name: tg-llm-bot
     restart: unless-stopped

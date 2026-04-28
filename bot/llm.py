@@ -8,13 +8,13 @@ from typing import Any, AsyncIterator
 import httpx
 from openai import AsyncOpenAI
 
-from .tools.tavily import TavilyClient
+from .tools.base import ToolContext, ToolManager
 
 log = logging.getLogger(__name__)
 
 
 class LLMClient:
-    def __init__(self, api_key: str, base_url: str, tavily_api_key: str = ""):
+    def __init__(self, api_key: str, base_url: str, tool_manager: ToolManager | None = None):
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -22,30 +22,11 @@ class LLMClient:
             max_retries=1,
         )
         self._base_url = base_url
-        self._tavily = TavilyClient(tavily_api_key)
+        self._tools = tool_manager
         self._web_search_support: dict[str, bool | None] = {}
         self._thinking_support: dict[str, bool | None] = {}
+        self._prompt_cache_support: dict[str, bool | None] = {}
         self._tool_calling_support: dict[str, bool | None] = {}
-        self._web_tool_schema = {
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "Search the web for up-to-date information and return short snippets with URLs.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query keywords."},
-                        "max_results": {
-                            "type": "integer",
-                            "description": "Maximum number of search results to return (1-10).",
-                            "minimum": 1,
-                            "maximum": 10,
-                        },
-                    },
-                    "required": ["query"],
-                },
-            },
-        }
 
     @staticmethod
     def _is_web_search_unsupported_error(exc: Exception) -> bool:
@@ -87,6 +68,30 @@ class LLMClient:
         return self._thinking_support.get(model)
 
     @staticmethod
+    def _is_prompt_cache_unsupported_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        cache_hint = any(
+            k in text
+            for k in (
+                "prompt_cache",
+                "prompt cache",
+                "cache_key",
+                "cache key",
+            )
+        )
+        unsupported_hint = any(
+            k in text for k in ("unknown", "unsupported", "not supported", "invalid", "unrecognized")
+        )
+        return cache_hint and unsupported_hint
+
+    def get_prompt_cache_support(self, model: str) -> bool | None:
+        """Return cached prompt-cache support for a model.
+
+        True/False are discovered from real requests; None means unknown.
+        """
+        return self._prompt_cache_support.get(model)
+
+    @staticmethod
     def _is_tool_calling_unsupported_error(exc: Exception) -> bool:
         text = str(exc).lower()
         tool_hint = any(k in text for k in ("tool", "tools", "tool_call", "function", "function_call"))
@@ -95,7 +100,15 @@ class LLMClient:
         )
         return tool_hint and unsupported_hint
 
-    def _base_extra(self, model: str, repeat_penalty: float, web_search: bool, thinking: bool) -> dict[str, Any]:
+    def _base_extra(
+        self,
+        model: str,
+        repeat_penalty: float,
+        web_search: bool,
+        thinking: bool,
+        prompt_cache: bool,
+        prompt_cache_key: str | None,
+    ) -> dict[str, Any]:
         extra_body: dict[str, Any] = {"repeat_penalty": repeat_penalty}
         support = self._web_search_support.get(model)
         if web_search and support is not False:
@@ -105,6 +118,11 @@ class LLMClient:
             extra_body["enable_thinking"] = True
         elif not thinking and thinking_support is True:
             extra_body["enable_thinking"] = False
+        prompt_cache_support = self._prompt_cache_support.get(model)
+        if prompt_cache and prompt_cache_support is not False:
+            extra_body["prompt_cache"] = True
+            if prompt_cache_key:
+                extra_body["prompt_cache_key"] = prompt_cache_key
         return extra_body
 
     async def _create_non_stream(
@@ -135,6 +153,7 @@ class LLMClient:
     async def _maybe_search_with_tavily(
         self,
         *,
+        user_id: int,
         model: str,
         messages: list[dict[str, Any]],
         temperature: float,
@@ -143,7 +162,10 @@ class LLMClient:
         extra_body: dict[str, Any],
         web_search: bool,
     ) -> Any | None:
-        if not (web_search and self._tavily.enabled):
+        if not web_search or self._tools is None:
+            return None
+        tools = self._tools.available_schemas(["web_search"])
+        if not tools:
             return None
         tool_support = self._tool_calling_support.get(model)
         if tool_support is False:
@@ -156,7 +178,7 @@ class LLMClient:
                 top_p=top_p,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
-                tools=[self._web_tool_schema],
+                tools=tools,
             )
             self._tool_calling_support[model] = True
         except Exception as e:
@@ -178,29 +200,27 @@ class LLMClient:
                 "tool_calls": [tc.model_dump() if hasattr(tc, "model_dump") else tc for tc in tool_calls],
             }
         )
-        for call in tool_calls[:2]:
+        call_cap = self._tools.max_calls()
+        for call in tool_calls[:call_cap]:
             fn = getattr(call, "function", None)
-            if not fn or getattr(fn, "name", "") != "web_search":
+            tool_name = getattr(fn, "name", "") if fn else ""
+            if not fn or not tool_name:
                 continue
             args_raw = getattr(fn, "arguments", "") or "{}"
             try:
                 args = json.loads(args_raw)
             except Exception:
                 args = {}
-            query = str(args.get("query", "")).strip()
-            if not query:
-                result = {"error": "missing query"}
-            else:
-                max_results = int(args.get("max_results", 5) or 5)
-                try:
-                    result = await self._tavily.search(query=query, max_results=max_results)
-                except Exception as e:
-                    result = {"error": f"tavily search failed: {e}"}
+            result = await self._tools.execute(
+                name=tool_name,
+                args=args,
+                context=ToolContext(user_id=user_id),
+            )
             tool_messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": getattr(call, "id", ""),
-                    "name": "web_search",
+                    "name": tool_name,
                     "content": json.dumps(result, ensure_ascii=False),
                 }
             )
@@ -227,6 +247,7 @@ class LLMClient:
     async def chat_once(
         self,
         *,
+        user_id: int,
         model: str,
         messages: list[dict[str, Any]],
         temperature: float,
@@ -235,11 +256,21 @@ class LLMClient:
         max_tokens: int,
         web_search: bool,
         thinking: bool,
+        prompt_cache: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> tuple[str, int, int]:
         """Non-streaming chat. Returns (text, prompt_tokens, completion_tokens)."""
-        extra_body = self._base_extra(model, repeat_penalty, web_search, thinking)
+        extra_body = self._base_extra(
+            model,
+            repeat_penalty,
+            web_search,
+            thinking,
+            prompt_cache,
+            prompt_cache_key,
+        )
         try:
             tool_resp = await self._maybe_search_with_tavily(
+                user_id=user_id,
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -264,6 +295,8 @@ class LLMClient:
                 self._web_search_support[model] = True
             if "enable_thinking" in extra_body:
                 self._thinking_support[model] = True
+            if "prompt_cache" in extra_body:
+                self._prompt_cache_support[model] = True
         except Exception as e:
             if "web_search" in extra_body and self._is_web_search_unsupported_error(e):
                 self._web_search_support[model] = False
@@ -293,6 +326,22 @@ class LLMClient:
                     extra_body=fallback_extra,
                     tools=None,
                 )
+            elif "prompt_cache" in extra_body and self._is_prompt_cache_unsupported_error(e):
+                self._prompt_cache_support[model] = False
+                fallback_extra = {"repeat_penalty": repeat_penalty}
+                if "web_search" in extra_body:
+                    fallback_extra["web_search"] = True
+                if "enable_thinking" in extra_body:
+                    fallback_extra["enable_thinking"] = extra_body["enable_thinking"]
+                resp = await self._create_non_stream(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    extra_body=fallback_extra,
+                    tools=None,
+                )
             else:
                 raise
         text = resp.choices[0].message.content or ""
@@ -304,6 +353,7 @@ class LLMClient:
     async def chat_stream(
         self,
         *,
+        user_id: int,
         model: str,
         messages: list[dict[str, Any]],
         temperature: float,
@@ -312,34 +362,52 @@ class LLMClient:
         max_tokens: int,
         web_search: bool,
         thinking: bool,
+        prompt_cache: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> AsyncIterator[tuple[str, int, int]]:
         """Streaming chat. Yields (delta_text, prompt_tokens, completion_tokens).
 
         Token counts are 0 for intermediate chunks and only populated on the final chunk
         when the upstream supports `stream_options.include_usage`.
         """
-        if web_search and self._tavily.enabled:
-            text, pt, ct = await self.chat_once(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                top_p=top_p,
-                repeat_penalty=repeat_penalty,
-                max_tokens=max_tokens,
-                web_search=web_search,
-                thinking=thinking,
-            )
-            if not text:
-                yield "", pt, ct
+        if web_search and self._tools is not None and self._tools.available_schemas(["web_search"]):
+            try:
+                text, pt, ct = await self.chat_once(
+                    user_id=user_id,
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                    max_tokens=max_tokens,
+                    web_search=web_search,
+                    thinking=thinking,
+                    prompt_cache=prompt_cache,
+                    prompt_cache_key=prompt_cache_key,
+                )
+                if not text:
+                    yield "", pt, ct
+                    return
+                step = 180
+                for i in range(0, len(text), step):
+                    part = text[i : i + step]
+                    is_last = i + step >= len(text)
+                    yield part, (pt if is_last else 0), (ct if is_last else 0)
                 return
-            step = 180
-            for i in range(0, len(text), step):
-                part = text[i : i + step]
-                is_last = i + step >= len(text)
-                yield part, (pt if is_last else 0), (ct if is_last else 0)
-            return
+            except Exception as e:
+                # If tool-calling path times out/fails, degrade to normal streaming
+                # instead of failing the whole request.
+                log.warning("tavily path failed, fallback to direct stream: %s", e)
+                web_search = False
 
-        extra_body = self._base_extra(model, repeat_penalty, web_search, thinking)
+        extra_body = self._base_extra(
+            model,
+            repeat_penalty,
+            web_search,
+            thinking,
+            prompt_cache,
+            prompt_cache_key,
+        )
         try:
             stream = await self._client.chat.completions.create(
                 model=model,
@@ -355,6 +423,8 @@ class LLMClient:
                 self._web_search_support[model] = True
             if "enable_thinking" in extra_body:
                 self._thinking_support[model] = True
+            if "prompt_cache" in extra_body:
+                self._prompt_cache_support[model] = True
         except Exception as e:
             if "web_search" in extra_body and self._is_web_search_unsupported_error(e):
                 self._web_search_support[model] = False
@@ -376,6 +446,23 @@ class LLMClient:
                 fallback_extra = {"repeat_penalty": repeat_penalty}
                 if "web_search" in extra_body:
                     fallback_extra["web_search"] = True
+                stream = await self._client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    extra_body=fallback_extra,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+            elif "prompt_cache" in extra_body and self._is_prompt_cache_unsupported_error(e):
+                self._prompt_cache_support[model] = False
+                fallback_extra = {"repeat_penalty": repeat_penalty}
+                if "web_search" in extra_body:
+                    fallback_extra["web_search"] = True
+                if "enable_thinking" in extra_body:
+                    fallback_extra["enable_thinking"] = extra_body["enable_thinking"]
                 stream = await self._client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -397,3 +484,14 @@ class LLMClient:
             pt = getattr(usage, "prompt_tokens", 0) or 0 if usage else 0
             ct = getattr(usage, "completion_tokens", 0) or 0 if usage else 0
             yield delta, pt, ct
+
+    async def embed_texts(self, *, model: str, inputs: list[str]) -> list[list[float]]:
+        payload = [str(x or "").strip() for x in inputs if str(x or "").strip()]
+        if not payload:
+            return []
+        resp = await self._client.embeddings.create(model=model, input=payload)
+        vectors: list[list[float]] = []
+        for item in resp.data:
+            emb = getattr(item, "embedding", None)
+            vectors.append(list(emb or []))
+        return vectors

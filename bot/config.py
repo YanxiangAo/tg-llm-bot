@@ -47,8 +47,26 @@ class Config:
     default_max_tokens: int
     web_search_default: bool
     thinking_default: bool
+    prompt_cache_default: bool
     max_history_messages: int
+    summary_trigger_messages: int
+    summary_trigger_tokens: int
+    summary_model: str
+    summary_keep_recent_messages: int
+    summary_max_tokens: int
+    summary_context_max_tokens: int
+    prompt_max_input_tokens: int
+    prompt_keep_recent_messages: int
     stream_default: bool
+    embedding_model: str
+    rag_enabled_default: bool
+    rag_chunk_size: int
+    rag_chunk_overlap: int
+    rag_top_k: int
+    rag_min_score: float
+    tools_enabled: list[str]
+    tool_timeout_seconds: float
+    tool_max_calls_per_request: int
     data_dir: Path
     log_level: str
 
@@ -70,7 +88,7 @@ class Config:
             except ValueError:
                 pass
 
-        return cls(
+        cfg = cls(
             bot_token=token,
             api_key=api_key,
             tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
@@ -84,8 +102,30 @@ class Config:
             default_max_tokens=_int(os.getenv("DEFAULT_MAX_TOKENS"), 2048),
             web_search_default=_bool(os.getenv("WEB_SEARCH_DEFAULT"), False),
             thinking_default=_bool(os.getenv("THINKING_DEFAULT"), False),
+            prompt_cache_default=_bool(os.getenv("PROMPT_CACHE_DEFAULT"), False),
             max_history_messages=_int(os.getenv("MAX_HISTORY_MESSAGES"), 20),
+            summary_trigger_messages=_int(os.getenv("SUMMARY_TRIGGER_MESSAGES"), 16),
+            summary_trigger_tokens=_int(os.getenv("SUMMARY_TRIGGER_TOKENS"), 6000),
+            summary_model=os.getenv("SUMMARY_MODEL", "").strip(),
+            summary_keep_recent_messages=_int(os.getenv("SUMMARY_KEEP_RECENT_MESSAGES"), 8),
+            summary_max_tokens=_int(os.getenv("SUMMARY_MAX_TOKENS"), 512),
+            summary_context_max_tokens=_int(os.getenv("SUMMARY_CONTEXT_MAX_TOKENS"), 1200),
+            prompt_max_input_tokens=_int(os.getenv("PROMPT_MAX_INPUT_TOKENS"), 10000),
+            prompt_keep_recent_messages=_int(os.getenv("PROMPT_KEEP_RECENT_MESSAGES"), 10),
             stream_default=_bool(os.getenv("STREAM_DEFAULT"), True),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small").strip(),
+            rag_enabled_default=_bool(os.getenv("RAG_ENABLED_DEFAULT"), True),
+            rag_chunk_size=_int(os.getenv("RAG_CHUNK_SIZE"), 1200),
+            rag_chunk_overlap=_int(os.getenv("RAG_CHUNK_OVERLAP"), 200),
+            rag_top_k=_int(os.getenv("RAG_TOP_K"), 4),
+            rag_min_score=_float(os.getenv("RAG_MIN_SCORE"), 0.35),
+            tools_enabled=_csv(os.getenv("TOOLS_ENABLED")),
+            tool_timeout_seconds=_float(os.getenv("TOOL_TIMEOUT_SECONDS"), 20.0),
+            tool_max_calls_per_request=_int(os.getenv("TOOL_MAX_CALLS_PER_REQUEST"), 2),
             data_dir=Path(os.getenv("DATA_DIR", "/data")),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
         )
+        # Avoid generating summaries that are immediately clipped when injected into prompt.
+        if cfg.summary_context_max_tokens > 0:
+            cfg.summary_context_max_tokens = max(cfg.summary_context_max_tokens, cfg.summary_max_tokens)
+        return cfg

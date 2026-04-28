@@ -6,13 +6,14 @@ A Telegram bot connected to any OpenAI-compatible API, with support for:
 
 - Model switching (`/model`)
 - System prompt management (`/system`) + prompt presets (`/preset`)
-- Parameter tuning (`/params`: temperature, top_p, repeat_penalty, max_tokens, stream, web_search, thinking)
+- Parameter tuning (`/params`: temperature, top_p, repeat_penalty, max_tokens, stream, web_search, thinking, prompt_cache)
 - Multi-turn context (history kept in current session)
 - Multi-session management (list, switch, delete, auto titles)
 - Streaming replies (edit message while generating)
 - Dynamic waiting seconds before first token (to show bot is alive)
 - Token usage stats (`/stats`)
 - Vision input (send image directly, requires a vision-capable model)
+- Lightweight RAG: upload `PDF/TXT/MD` into a local SQLite knowledge store, with auto retrieval during chat
 - Telegram user ID whitelist
 - One-command Docker Compose deployment
 
@@ -46,6 +47,21 @@ Key variables:
 | `DEFAULT_REPEAT_PENALTY` | Default repeat penalty float |
 | `WEB_SEARCH_DEFAULT` | Try web search by default (auto-fallback if unsupported) |
 | `THINKING_DEFAULT` | Enable thinking mode by default (auto-fallback if unsupported) |
+| `PROMPT_CACHE_DEFAULT` | Try Prompt Cache by default (auto-fallback if unsupported by your OpenAI-compatible gateway) |
+| `EMBEDDING_MODEL` | Embedding model for RAG (OpenAI-compatible embeddings) |
+| `RAG_ENABLED_DEFAULT` | Enable RAG retrieval by default (session-level override available) |
+| `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | RAG chunking settings |
+| `RAG_TOP_K` / `RAG_MIN_SCORE` | RAG retrieval top-k and similarity threshold |
+| `TOOLS_ENABLED` | Enabled tools list for tool framework (e.g. `web_search`) |
+| `TOOL_TIMEOUT_SECONDS` / `TOOL_MAX_CALLS_PER_REQUEST` | Tool timeout and per-request call quota |
+| `SUMMARY_TRIGGER_MESSAGES` | Trigger background session summarization when history reaches this message count |
+| `SUMMARY_TRIGGER_TOKENS` | Trigger summarization when estimated history tokens reach this threshold |
+| `SUMMARY_MODEL` | Dedicated model for session summarization; empty means follow current chat model |
+| `SUMMARY_KEEP_RECENT_MESSAGES` | Keep latest raw messages after summarization; older history is compressed |
+| `SUMMARY_MAX_TOKENS` | Max output tokens for summarization generation |
+| `SUMMARY_CONTEXT_MAX_TOKENS` | Estimated token cap for summary injected into context |
+| `PROMPT_MAX_INPUT_TOKENS` | Estimated input-token hard cap per request |
+| `PROMPT_KEEP_RECENT_MESSAGES` | Max recent raw messages kept when prompt trimming is triggered |
 
 ## 3) Start
 
@@ -74,23 +90,30 @@ Send these commands to the bot:
 /set top_p 0.9
 /set repeat_penalty 1.1
 /set max_tokens 4096
+/set summary_model llama-3.3-70b-versatile
+/set embedding_model text-embedding-v3
 /set stream off
 /set web_search on
 /set thinking on
+/set prompt_cache on
+/set rag on
 /sessions                 list sessions (switch/delete)
 /newchat                  create a new session
 /use <session_id>         continue an old session
 /delsession <session_id>  delete a session (no arg = current)
+/ragfiles                 list uploaded knowledge files
 /stats                    show session config and token usage
 /id                       show your Telegram user ID
 ```
 
 Send text = normal chat.  
 Send image = vision chat (caption is used as the question).  
+Send `PDF/TXT/MD` = ingest into local knowledge store (SQLite + vector retrieval), then chat can auto-retrieve relevant chunks.  
 When switching sessions (`/use` or `/sessions` button), the bot also sends a short conversation summary for quick context recovery.
 System prompt and sampling parameters are also session-scoped and restored when you switch back.
 Thinking-mode support is auto-detected per model, with fallback when unsupported.  
-When `web_search` is on and `TAVILY_API_KEY` is configured, the model can call an external Tavily web-search tool before finalizing the answer.
+When `web_search` is on and `TAVILY_API_KEY` is configured, Tavily is exposed as a tool and the model decides whether to call it.
+If `PROMPT_CACHE_DEFAULT=true`, requests include `prompt_cache` and `prompt_cache_key`; if unsupported by the gateway/model, it automatically retries without prompt-cache fields.
 
 ## 5) Todo
 
